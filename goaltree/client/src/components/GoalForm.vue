@@ -33,6 +33,11 @@
           style="width:100%"
         />
       </el-form-item>
+      <el-form-item label="预估时长">
+        <el-input v-model="form.estimated_hours" placeholder="例如：600" style="width:100%">
+          <template #append>小时</template>
+        </el-input>
+      </el-form-item>
     </el-form>
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
@@ -45,6 +50,7 @@
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useGoalStore } from '../stores/goals'
+import { errorHandler } from '../utils/errorHandler'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -63,13 +69,18 @@ const visible = computed({
 
 const isEdit = computed(() => !!props.editData)
 
-const form = ref({ title: '', description: '', parent_id: null })
+const form = ref({ title: '', description: '', parent_id: null, estimated_hours: null })
 const dateRange = ref([])
 
 // 编辑时回填数据
 watch(() => props.editData, (val) => {
   if (val) {
-    form.value = { title: val.title, description: val.description || '', parent_id: val.parent_id || null }
+    form.value = {
+      title: val.title,
+      description: val.description || '',
+      parent_id: val.parent_id || null,
+      estimated_hours: val.estimated_hours || null,
+    }
     dateRange.value = val.start_date && val.end_date ? [val.start_date, val.end_date] : []
   }
 }, { immediate: true })
@@ -80,36 +91,79 @@ const availableParents = computed(() =>
 )
 
 const rules = {
-  title: [{ required: true, message: '请输入目标名称', trigger: 'blur' }],
+  title: [
+    { required: true, message: '请输入目标名称', trigger: 'blur' },
+    { min: 2, max: 100, message: '目标名称长度在 2 到 100 个字符', trigger: 'blur' },
+  ],
+  parent_id: [
+    {
+      validator: (rule, value, callback) => {
+        if (isEdit.value && value === props.editData.id) {
+          callback(new Error('不能选择自己作为父目标'));
+        } else {
+          callback();
+        }
+      },
+      trigger: 'change'
+    }
+  ],
+  dateRange: [
+    {
+      validator: (rule, value, callback) => {
+        if (value && value[0] && value[1]) {
+          const startDate = new Date(value[0]);
+          const endDate = new Date(value[1]);
+          if (startDate > endDate) {
+            callback(new Error('开始日期不能晚于结束日期'));
+          } else {
+            callback();
+          }
+        } else {
+          callback();
+        }
+      },
+      trigger: 'change'
+    }
+  ]
 }
 
 async function submit() {
-  await formRef.value.validate()
-  submitting.value = true
   try {
+    await formRef.value.validate()
+
+    // 验证时间范围
+    if (dateRange.value && dateRange.value.length === 2) {
+      const startDate = new Date(dateRange.value[0]);
+      const endDate = new Date(dateRange.value[1]);
+      if (startDate > endDate) {
+        throw new Error('开始日期不能晚于结束日期');
+      }
+    }
+
     const payload = {
       ...form.value,
       start_date: dateRange.value?.[0] || null,
       end_date: dateRange.value?.[1] || null,
     }
+
     if (isEdit.value) {
       await goalStore.update(props.editData.id, payload)
-      ElMessage.success('目标已更新')
+      errorHandler.showSuccess('目标已更新')
     } else {
       await goalStore.create(payload)
-      ElMessage.success('目标已创建')
+      errorHandler.showSuccess('目标已创建')
     }
     visible.value = false
   } catch (e) {
-    const msg = e.response?.data?.message || e.message || '网络错误，请检查后端是否运行'
-    ElMessage.error(msg)
+    const errorMsg = errorHandler.handleApiError(e, '操作失败');
+    errorHandler.showError(errorMsg);
   } finally {
     submitting.value = false
   }
 }
 
 function resetForm() {
-  form.value = { title: '', description: '', parent_id: null }
+  form.value = { title: '', description: '', parent_id: null, estimated_hours: null }
   dateRange.value = []
   formRef.value?.resetFields()
 }

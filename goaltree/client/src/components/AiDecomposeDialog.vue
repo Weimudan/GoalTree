@@ -1,14 +1,14 @@
 <template>
-  <el-dialog v-model="visible" title="AI 目标拆解" width="500px" @closed="reset">
+  <el-dialog v-model="visible" title="AI 目标拆解" width="560px" @closed="reset">
     <!-- 目标信息 -->
     <div class="goal-info">
       <el-icon><Aim /></el-icon>
       <span class="goal-name">{{ goal?.title }}</span>
     </div>
 
-    <!-- 初始状态：还没拆解 -->
+    <!-- 初始状态 -->
     <div v-if="state === 'idle'" class="idle-body">
-      <p class="hint">AI 会根据目标名称和时间范围，自动拆解出 3～5 个可执行的子目标，你可以按需勾选后一键创建。</p>
+      <p class="hint">AI 会将这个目标拆解为子目标 + 建议任务，并估算每个子目标/任务的时长，你可以按需勾选后一键创建。</p>
       <el-button type="primary" :icon="MagicStick" @click="runDecompose">开始拆解</el-button>
     </div>
 
@@ -26,28 +26,42 @@
 
     <!-- 结果 -->
     <div v-else-if="state === 'done'" class="result-body">
-      <p class="result-hint">已为你拆解出以下子目标，勾选想要创建的：</p>
-      <el-checkbox-group v-model="selected" class="checkbox-list">
+      <p class="result-hint">已拆解出以下子目标及建议任务，勾选想要创建的：</p>
+      <div
+        v-for="(item, i) in suggestions"
+        :key="i"
+        class="subgoal-block"
+        :class="{ selected: selectedSet.has(i) }"
+      >
         <el-checkbox
-          v-for="(s, i) in suggestions"
-          :key="i"
-          :label="s"
-          class="checkbox-item"
+          :model-value="selectedSet.has(i)"
+          class="subgoal-check"
+          @change="(v) => toggleSubGoal(i, v)"
         >
-          {{ s }}
+          <span class="subgoal-title">{{ item.title }}</span>
+          <el-tag v-if="item.estimated_hours" size="small" type="warning" class="hours-tag">
+            预估 {{ item.estimated_hours }}h
+          </el-tag>
         </el-checkbox>
-      </el-checkbox-group>
+        <div v-if="selectedSet.has(i) && item.tasks?.length" class="task-list">
+          <div v-for="(t, j) in item.tasks" :key="j" class="task-item">
+            <el-icon><CircleCheck /></el-icon>
+            <span>{{ t.title }}</span>
+            <el-tag v-if="t.estimated_minutes" size="small" class="min-tag">{{ t.estimated_minutes }}min</el-tag>
+          </div>
+        </div>
+      </div>
       <div class="result-actions">
         <el-button text @click="runDecompose">重新生成</el-button>
         <div>
           <el-button @click="visible = false">取消</el-button>
           <el-button
             type="primary"
-            :disabled="!selected.length"
+            :disabled="!selectedSet.size"
             :loading="creating"
             @click="handleCreate"
           >
-            创建选中的 {{ selected.length }} 个子目标
+            创建选中的 {{ selectedSet.size }} 个子目标
           </el-button>
         </div>
       </div>
@@ -62,9 +76,11 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Aim, MagicStick, Loading } from '@element-plus/icons-vue'
+import { Aim, MagicStick, Loading, CircleCheck } from '@element-plus/icons-vue'
 import { decomposeGoal } from '../api/ai'
 import { useGoalStore } from '../stores/goals'
+import { createTask } from '../api/tasks'
+import dayjs from 'dayjs'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -73,9 +89,9 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue'])
 
 const goalStore = useGoalStore()
-const state = ref('idle')       // idle | loading | done | error
+const state = ref('idle')
 const suggestions = ref([])
-const selected = ref([])
+const selectedSet = ref(new Set())
 const errorMsg = ref('')
 const creating = ref(false)
 
@@ -84,13 +100,12 @@ const visible = computed({
   set: (v) => emit('update:modelValue', v),
 })
 
-// 每次打开都重置
 watch(visible, (v) => { if (v) reset() })
 
 function reset() {
   state.value = 'idle'
   suggestions.value = []
-  selected.value = []
+  selectedSet.value = new Set()
   errorMsg.value = ''
 }
 
@@ -98,7 +113,8 @@ async function runDecompose() {
   state.value = 'loading'
   try {
     suggestions.value = await decomposeGoal(props.goal)
-    selected.value = [...suggestions.value]   // 默认全选
+    // 默认全选所有子目标
+    selectedSet.value = new Set(suggestions.value.map((_, i) => i))
     state.value = 'done'
   } catch (e) {
     errorMsg.value = e.response?.data?.message || 'AI 服务暂时不可用，请稍后重试'
@@ -106,21 +122,68 @@ async function runDecompose() {
   }
 }
 
+function toggleSubGoal(i, checked) {
+  const next = new Set(selectedSet.value)
+  checked ? next.add(i) : next.delete(i)
+  selectedSet.value = next
+}
+
 async function handleCreate() {
   creating.value = true
   try {
-    for (const title of selected.value) {
-      await goalStore.create({
-        title,
+    // 排期起点：当前本地时间取整到最近 30 分钟；晚于 20 点则推到明天 9 点
+    const now = dayjs()
+    let scheduleDate = now.format('YYYY-MM-DD')
+    let currentMin = now.hour() * 60 + now.minute()
+    if (currentMin >= 20 * 60) {
+      scheduleDate = now.add(1, 'day').format('YYYY-MM-DD')
+      currentMin = 9 * 60
+    } else {
+      currentMin = Math.ceil(currentMin / 30) * 30
+    }
+
+    const fmt = (m) => {
+      const hh = String(Math.floor(m / 60)).padStart(2, '0')
+      const mm = String(m % 60).padStart(2, '0')
+      return hh + ':' + mm + ':00'
+    }
+
+    for (const i of selectedSet.value) {
+      const item = suggestions.value[i]
+      const createdGoal = await goalStore.createAndReturn({
+        title: item.title,
         parent_id: props.goal.id,
+        estimated_hours: item.estimated_hours || null,
         start_date: props.goal.start_date || null,
         end_date: props.goal.end_date || null,
       })
+
+      if (item.tasks?.length && createdGoal?.id) {
+        for (const t of item.tasks) {
+          const dur = t.estimated_minutes || 60
+          // 跨天则推到次日 9:00
+          if (currentMin + dur > 23 * 60 + 30) {
+            scheduleDate = dayjs(scheduleDate).add(1, 'day').format('YYYY-MM-DD')
+            currentMin = 9 * 60
+          }
+          try {
+            await createTask({
+              goal_id: createdGoal.id,
+              title: t.title,
+              task_date: scheduleDate,
+              start_time: fmt(currentMin),
+              end_time: fmt(currentMin + dur),
+            })
+            currentMin += dur
+          } catch { /* 忽略单个任务失败 */ }
+        }
+      }
     }
-    ElMessage.success(`已创建 ${selected.value.length} 个子目标`)
+    ElMessage.success(`已创建 ${selectedSet.value.size} 个子目标及其任务`)
+    await goalStore.fetch()
     visible.value = false
-  } catch {
-    ElMessage.error('部分子目标创建失败，请重试')
+  } catch (e) {
+    ElMessage.error('部分创建失败：' + (e.response?.data?.message || e.message))
   } finally {
     creating.value = false
   }
@@ -144,13 +207,8 @@ async function handleCreate() {
 .hint { color: #606266; font-size: 13px; line-height: 1.8; margin-bottom: 20px; }
 
 .loading-body {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 32px 0;
-  color: #909399;
-  font-size: 14px;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 32px 0; color: #909399; font-size: 14px;
 }
 .spin { font-size: 32px; color: #409eff; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -158,19 +216,32 @@ async function handleCreate() {
 .error-body { padding: 8px 0; }
 
 .result-hint { font-size: 13px; color: #606266; margin-bottom: 12px; }
-.checkbox-list { display: flex; flex-direction: column; gap: 4px; }
-.checkbox-item {
-  padding: 8px 12px;
-  border-radius: 6px;
+
+.subgoal-block {
   border: 1px solid #e4e7ed;
-  margin: 0 !important;
-  transition: background 0.15s;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 8px;
+  transition: border-color 0.2s;
 }
-.checkbox-item:hover { background: #f5f7fa; }
+.subgoal-block.selected { border-color: #409eff; background: #f0f7ff; }
+.subgoal-check { margin-right: 0 !important; }
+.subgoal-title { font-weight: 500; }
+.hours-tag { margin-left: 8px; }
+
+.task-list {
+  margin: 8px 0 0 24px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.task-item {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; color: #606266;
+}
+.task-item .el-icon { color: #67c23a; font-size: 14px; }
+.min-tag { font-size: 11px; margin-left: auto; }
+
 .result-actions {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  display: flex; justify-content: space-between; align-items: center;
   margin-top: 16px;
 }
 </style>

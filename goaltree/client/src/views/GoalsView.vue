@@ -5,6 +5,19 @@
       <div class="header-right">
         <el-segmented v-model="viewMode" :options="viewOptions" />
         <el-button type="primary" :icon="Plus" @click="openCreate()">新建顶层目标</el-button>
+        <el-dropdown v-if="goalStore.tree.length" trigger="click" @command="batchDelete">
+          <el-button type="danger" plain :icon="Delete">批量清理</el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="clearChildren">
+                <el-icon><List /></el-icon> 清空子目标（保留根目标）
+              </el-dropdown-item>
+              <el-dropdown-item command="clearAll">
+                <el-icon><Warning /></el-icon> 删除全部目标
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
     </div>
 
@@ -26,13 +39,15 @@
               <div class="node-left">
                 <el-icon class="node-icon"><Aim /></el-icon>
                 <span class="node-title">{{ data.title }}</span>
+                <el-tag v-if="getHours(data.id)" size="small" type="success" class="node-tag">
+                  {{ getHours(data.id) }}
+                </el-tag>
                 <el-tag v-if="data.start_date" size="small" type="info" class="node-tag">
                   {{ formatDate(data.start_date) }} ~ {{ formatDate(data.end_date) || '未定' }}
                 </el-tag>
               </div>
               <div class="node-actions">
                 <el-button
-                  v-if="!data.parent_id"
                   size="small"
                   text
                   type="primary"
@@ -55,7 +70,11 @@
         </el-tree>
 
         <!-- 图形视图 -->
-        <GoalTreeChart v-else :data="goalStore.tree" />
+        <GoalTreeChart
+          v-else
+          :data="goalStore.tree"
+          :onNodeClick="handleNodeClick"
+        />
       </template>
     </el-card>
 
@@ -72,9 +91,10 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import dayjs from 'dayjs'
-import { Plus, Edit, Delete, Aim, MagicStick } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { Plus, Edit, Delete, Aim, MagicStick, Timer, List, Warning } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useGoalStore } from '../stores/goals'
+import { getGoalTime } from '../api/tasks'
 import GoalForm from '../components/GoalForm.vue'
 import GoalTreeChart from '../components/GoalTreeChart.vue'
 import AiDecomposeDialog from '../components/AiDecomposeDialog.vue'
@@ -91,7 +111,31 @@ const viewOptions = [
   { label: '图形', value: 'chart' },
 ]
 
-onMounted(() => goalStore.fetch())
+// 目标耗时映射: id → total_hours
+const hourMap = ref({})
+
+onMounted(async () => {
+  await goalStore.fetch()
+  loadGoalTimes()
+})
+
+async function loadGoalTimes() {
+  try {
+    const data = await getGoalTime()
+    // 递归拍平所有目标及其耗时
+    function flatten(g, result = {}) {
+      result[g.id] = g.total_hours ?? 0
+      if (g.children) g.children.forEach(c => flatten(c, result))
+      return result
+    }
+    data.goals.forEach(g => flatten(g, hourMap.value))
+  } catch { /* 静默 */ }
+}
+
+function getHours(id) {
+  const h = hourMap.value[id]
+  return h != null && h > 0 ? h + 'h' : ''
+}
 
 function openAi(data) {
   aiTarget.value = data
@@ -120,6 +164,60 @@ async function handleDelete(id) {
   } catch (e) {
     ElMessage.error(e.response?.data?.message || '删除失败')
   }
+}
+
+async function batchDelete(command) {
+  const tree = goalStore.tree
+  if (!tree.length) return
+
+  if (command === 'clearChildren') {
+    // 收集根目标的直接子节点 → 删父级联删孙
+    const childIds = []
+    tree.forEach(root => {
+      if (root.children) root.children.forEach(c => childIds.push(c.id))
+    })
+    if (!childIds.length) {
+      ElMessage.info('没有子目标可删除')
+      return
+    }
+    try {
+      await ElMessageBox.confirm(
+        `将删除 ${childIds.length} 个子目标及其所有后代+任务，根目标保留。确认？`,
+        '清空子目标',
+        { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' }
+      )
+    } catch { return }
+
+    let count = 0
+    for (const id of childIds) {
+      try { await goalStore.remove(id); count++ } catch { /* skip */ }
+    }
+    await goalStore.fetch()
+    ElMessage.success(`已删除 ${count} 个子目标`)
+    loadGoalTimes()
+  } else if (command === 'clearAll') {
+    try {
+      await ElMessageBox.confirm(
+        '将删除全部目标及所有关联任务，不可恢复。确认？',
+        '删除全部',
+        { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' }
+      )
+    } catch { return }
+
+    let count = 0
+    for (const root of tree) {
+      try { await goalStore.remove(root.id); count++ } catch { /* skip */ }
+    }
+    await goalStore.fetch()
+    ElMessage.success('已删除全部目标')
+    loadGoalTimes()
+  }
+}
+
+function handleNodeClick(nodeData) {
+  // 节点点击处理逻辑
+  console.log('节点点击:', nodeData)
+  // 可以在这里添加编辑、查看详情等逻辑
 }
 </script>
 

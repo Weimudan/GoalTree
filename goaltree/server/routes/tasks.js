@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 
+// 状态计算缓存，提高性能
+const statusCache = new Map();
+
 // 动态计算任务状态（不存库，读取时算）
 // status: 'upcoming' | 'pending' | 'completed' | 'expired'
 //   upcoming  — 还没到开始时间
@@ -10,17 +13,45 @@ const db = require('../db');
 //   expired   — 超过 end_time+10min 仍未完成
 function calcStatus(task) {
   if (task.completed_at) return 'completed';
+
+  // 使用缓存键
+  const cacheKey = `${task.task_date}-${task.start_time}-${task.end_time}`;
+  if (statusCache.has(cacheKey)) {
+    return statusCache.get(cacheKey);
+  }
+
   const now = new Date();
   const start = new Date(`${task.task_date}T${task.start_time}+08:00`);
   const deadline = new Date(`${task.task_date}T${task.end_time}+08:00`);
   deadline.setMinutes(deadline.getMinutes() + 10);
-  if (now < start) return 'upcoming';
-  if (now > deadline) return 'expired';
-  return 'pending';
+
+  // 优化：使用时间戳比较，提高性能
+  const nowTimestamp = now.getTime();
+  const startTimestamp = start.getTime();
+  const deadlineTimestamp = deadline.getTime();
+
+  let status;
+  if (nowTimestamp < startTimestamp) status = 'upcoming';
+  else if (nowTimestamp > deadlineTimestamp) status = 'expired';
+  else status = 'pending';
+
+  // 缓存结果
+  statusCache.set(cacheKey, status);
+  return status;
 }
 
 function formatTask(task) {
   return { ...task, status: calcStatus(task) };
+}
+
+// 批量计算任务状态，提高性能
+function batchFormatTasks(tasks) {
+  return tasks.map(formatTask);
+}
+
+// 清理缓存（可选：可以添加定时清理逻辑）
+function clearStatusCache() {
+  statusCache.clear();
 }
 
 // GET /api/tasks?date=2026-06-19 — 查询某天的所有任务（含状态）
@@ -37,7 +68,9 @@ router.get('/', async (req, res) => {
        ORDER BY t.start_time ASC`,
       [date]
     );
-    res.json(rows.map(formatTask));
+
+    // 使用批量格式化，提高性能
+    res.json(batchFormatTasks(rows));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -201,6 +234,84 @@ router.get('/stats/range', async (req, res) => {
       };
     });
     res.json(result);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/tasks/stats/goal-time — 递归计算每个目标的累计耗时 + 全局总耗时
+router.get('/stats/goal-time', async (req, res) => {
+  try {
+    // 获取所有目标
+    const [goals] = await db.query('SELECT * FROM goals ORDER BY created_at ASC');
+
+    // 获取所有已完成任务及其耗时（小时）
+    const [tasks] = await db.query(
+      `SELECT goal_id, TIME_TO_SEC(TIMEDIFF(end_time, start_time)) / 3600 AS hours
+       FROM tasks
+       WHERE completed_at IS NOT NULL`
+    );
+
+    // 按 goal_id 汇总耗时
+    const goalTimeMap = {};
+    tasks.forEach(t => {
+      goalTimeMap[t.goal_id] = (goalTimeMap[t.goal_id] || 0) + Number(t.hours);
+    });
+
+    // 构建 id→goal 映射
+    const goalMap = {};
+    goals.forEach(g => { goalMap[g.id] = { ...g, children: [] }; });
+
+    // 建立父子关系
+    const roots = [];
+    goals.forEach(g => {
+      if (g.parent_id) {
+        goalMap[g.parent_id]?.children.push(goalMap[g.id]);
+      } else {
+        roots.push(goalMap[g.id]);
+      }
+    });
+
+    // 递归计算每个目标的累计耗时（自身任务耗时 + 所有子孙目标耗时）
+    function calcTotalHours(node) {
+      let total = goalTimeMap[node.id] || 0;
+      if (node.children) {
+        node.children.forEach(child => { total += calcTotalHours(child); });
+      }
+      node.total_hours = Math.round(total * 10) / 10;  // 保留1位小数
+      return total;
+    }
+    roots.forEach(r => calcTotalHours(r));
+
+    // 全局总耗时
+    const globalTotal = Object.values(goalTimeMap).reduce((a, b) => a + b, 0);
+
+    res.json({
+      goals: roots,
+      global_total_hours: Math.round(globalTotal * 10) / 10,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/tasks/stats/heatmap?start=&end= — 按日期聚合已完成任务时长
+router.get('/stats/heatmap', async (req, res) => {
+  const { start, end } = req.query;
+  if (!start || !end) return res.status(400).json({ message: '请传 start 和 end 参数' });
+
+  try {
+    const [rows] = await db.query(
+      `SELECT task_date,
+              ROUND(SUM(TIME_TO_SEC(TIMEDIFF(end_time, start_time))) / 3600, 1) AS hours
+       FROM tasks
+       WHERE completed_at IS NOT NULL
+         AND task_date BETWEEN ? AND ?
+       GROUP BY task_date
+       ORDER BY task_date ASC`,
+      [start, end]
+    );
+    res.json(rows.map(r => ({ date: r.task_date, hours: Number(r.hours) })));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

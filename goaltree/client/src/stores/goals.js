@@ -33,6 +33,11 @@ export const useGoalStore = defineStore('goals', {
       await createGoal(data)
       await this.fetch()
     },
+    async createAndReturn(data) {
+      const created = await createGoal(data)
+      await this.fetch()
+      return created
+    },
     async update(id, data) {
       await updateGoal(id, data)
       await this.fetch()

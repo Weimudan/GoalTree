@@ -52,6 +52,7 @@ import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useGoalStore } from '../stores/goals'
 import { createTask, updateTask } from '../api/tasks'
+import { errorHandler } from '../utils/errorHandler'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -123,32 +124,104 @@ function validateTimes() {
 }
 
 const rules = {
-  title: [{ required: true, message: '请输入任务名称', trigger: 'blur' }],
-  goal_id: [{ required: true, message: '请选择所属目标', trigger: 'change' }],
-  task_date: [{ required: true, message: '请选择日期', trigger: 'change' }],
+  title: [
+    { required: true, message: '请输入任务名称', trigger: 'blur' },
+    { min: 2, max: 100, message: '任务名称长度在 2 到 100 个字符', trigger: 'blur' },
+  ],
+  goal_id: [
+    { required: true, message: '请选择所属目标', trigger: 'change' },
+    {
+      validator: (rule, value, callback) => {
+        if (!value) {
+          callback(new Error('请选择所属目标'));
+        } else {
+          callback();
+        }
+      },
+      trigger: 'change'
+    }
+  ],
+  task_date: [
+    { required: true, message: '请选择日期', trigger: 'change' },
+    {
+      validator: (rule, value, callback) => {
+        if (value) {
+          // 将日期字符串按本地日期解析，避免 UTC 时区偏移导致今天也被判为"过去"
+          const [year, month, day] = value.split('-').map(Number);
+          const selected = new Date(year, month - 1, day);
+          const today = new Date();
+          // 只比较日期部分（年月日），忽略时间
+          const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+          if (selected < todayDate) {
+            callback(new Error('不能选择过去的日期'));
+          } else {
+            callback();
+          }
+        } else {
+          callback();
+        }
+      },
+      trigger: 'change'
+    }
+  ],
 }
 
 async function submit() {
-  await formRef.value.validate()
-  if (!validateTimes()) return
-  submitting.value = true
   try {
+    await formRef.value.validate()
+
+    // 验证时间逻辑
+    if (!validateTimes()) {
+      throw new Error(timeError.value || '时间格式错误');
+    }
+
+    // 验证日期逻辑（按本地日期解析，避免 UTC 时区偏移）
+    if (form.value.task_date) {
+      const [year, month, day] = form.value.task_date.split('-').map(Number);
+      const selected = new Date(year, month - 1, day);
+      const today = new Date();
+      const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      if (selected < todayDate) {
+        throw new Error('不能选择过去的日期');
+      }
+    }
+
+    submitting.value = true
     const payload = {
       ...form.value,
       start_time: form.value.start_time + ':00',
       end_time: form.value.end_time + ':00',
     }
+
     if (isEdit.value) {
       await updateTask(props.editData.id, payload)
-      ElMessage.success('任务已更新')
+      errorHandler.showSuccess('任务已更新')
     } else {
       await createTask(payload)
-      ElMessage.success('任务已创建')
+      errorHandler.showSuccess('任务已创建')
     }
     emit('saved')
     visible.value = false
   } catch (e) {
-    ElMessage.error(e.response?.data?.message || '操作失败')
+    let errorMsg = '';
+    if (e.response?.data?.message) {
+      errorMsg = e.response.data.message;
+    } else if (e.message) {
+      errorMsg = e.message;
+    } else {
+      errorMsg = '操作失败';
+    }
+
+    // 显示更友好的错误信息
+    if (e.message?.includes('不能选择过去的日期')) {
+      errorMsg = '不能选择过去的日期';
+    } else if (e.message?.includes('开始时间必须早于结束时间')) {
+      errorMsg = '开始时间必须早于结束时间';
+    } else if (e.message?.includes('格式错误')) {
+      errorMsg = '时间格式错误，请输入 HH:mm';
+    }
+
+    errorHandler.showError(errorMsg);
   } finally {
     submitting.value = false
   }

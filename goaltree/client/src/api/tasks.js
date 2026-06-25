@@ -9,5 +9,9 @@ export const deleteTask = (id) => axios.delete(`${base}/${id}`).then(r => r.data
 export const completeTask = (id) => axios.post(`${base}/${id}/complete`).then(r => r.data)
 export const getStatsRange = (start, end) =>
   axios.get(`${base}/stats/range`, { params: { start, end } }).then(r => r.data)
+export const getGoalTime = () =>
+  axios.get(`${base}/stats/goal-time`).then(r => r.data)
+export const getTimeHeatmap = (start, end) =>
+  axios.get(`${base}/stats/heatmap`, { params: { start, end } }).then(r => r.data)
 export const saveSummary = (id, summary) =>
   axios.patch(`${base}/${id}/summary`, { summary }).then(r => r.data)

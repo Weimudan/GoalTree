@@ -45,7 +45,7 @@ router.get('/:id', async (req, res) => {
 
 // POST /api/goals — 新建目标
 router.post('/', async (req, res) => {
-  const { title, description, parent_id, start_date, end_date } = req.body;
+  const { title, description, parent_id, start_date, end_date, estimated_hours } = req.body;
   if (!title) return res.status(400).json({ message: 'title 不能为空' });
 
   try {
@@ -56,8 +56,8 @@ router.post('/', async (req, res) => {
     }
 
     const [result] = await db.query(
-      'INSERT INTO goals (title, description, parent_id, start_date, end_date) VALUES (?, ?, ?, ?, ?)',
-      [title, description || null, parent_id || null, start_date || null, end_date || null]
+      'INSERT INTO goals (title, description, parent_id, start_date, end_date, estimated_hours) VALUES (?, ?, ?, ?, ?, ?)',
+      [title, description || null, parent_id || null, start_date || null, end_date || null, estimated_hours || null]
     );
     const [rows] = await db.query('SELECT * FROM goals WHERE id = ?', [result.insertId]);
     res.status(201).json(rows[0]);
@@ -68,7 +68,7 @@ router.post('/', async (req, res) => {
 
 // PUT /api/goals/:id — 修改目标
 router.put('/:id', async (req, res) => {
-  const { title, description, parent_id, start_date, end_date } = req.body;
+  const { title, description, parent_id, start_date, end_date, estimated_hours } = req.body;
   if (!title) return res.status(400).json({ message: 'title 不能为空' });
 
   try {
@@ -78,8 +78,8 @@ router.put('/:id', async (req, res) => {
     }
 
     const [result] = await db.query(
-      'UPDATE goals SET title=?, description=?, parent_id=?, start_date=?, end_date=? WHERE id=?',
-      [title, description || null, parent_id || null, start_date || null, end_date || null, req.params.id]
+      'UPDATE goals SET title=?, description=?, parent_id=?, start_date=?, end_date=?, estimated_hours=? WHERE id=?',
+      [title, description || null, parent_id || null, start_date || null, end_date || null, estimated_hours || null, req.params.id]
     );
     if (result.affectedRows === 0) return res.status(404).json({ message: '目标不存在' });
 

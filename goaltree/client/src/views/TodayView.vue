@@ -15,6 +15,15 @@
           @change="loadTasks"
         />
         <el-button type="primary" :icon="Plus" @click="taskFormVisible = true">新建任务</el-button>
+        <el-popconfirm
+          title="确认删除今日全部任务？此操作不可恢复"
+          confirm-button-text="确认删除"
+          @confirm="batchDelete"
+        >
+          <template #reference>
+            <el-button type="danger" :icon="Delete" :disabled="!tasks.length" plain>清空今日</el-button>
+          </template>
+        </el-popconfirm>
       </div>
     </div>
 
@@ -25,6 +34,14 @@
         <el-statistic title="已完成" :value="completedCount" />
         <el-statistic title="未完成" :value="expiredCount" />
         <el-statistic title="待完成" :value="pendingCount" />
+        <div class="stat-block">
+          <span class="stat-label">计划时长</span>
+          <span class="stat-value">{{ totalHours }}h</span>
+        </div>
+        <div class="stat-block">
+          <span class="stat-label">已完成时长</span>
+          <span class="stat-value completed">{{ completedHours }}h</span>
+        </div>
         <div class="progress-wrap">
           <span class="progress-label">完成率</span>
           <el-progress
@@ -58,8 +75,8 @@
                 </el-tag>
               </div>
               <div class="task-right">
-                <el-tag :type="statusTag(task.status).type" size="small">
-                  {{ statusTag(task.status).text }}
+                <el-tag :type="statusTag(task.status).type" size="small" :style="{ backgroundColor: statusInfo.color + '20', color: statusInfo.color }">
+                  {{ statusInfo.text }}
                 </el-tag>
                 <el-button
                   v-if="task.status === 'pending'"
@@ -161,6 +178,20 @@ const rate = computed(() =>
   tasks.value.length ? Math.round((completedCount.value / tasks.value.length) * 100) : 0
 )
 
+// 今日时长计算
+function taskHours(task) {
+  if (!task.start_time || !task.end_time) return 0
+  const [sh, sm] = task.start_time.slice(0, 5).split(':').map(Number)
+  const [eh, em] = task.end_time.slice(0, 5).split(':').map(Number)
+  return (eh * 60 + em - sh * 60 - sm) / 60
+}
+const totalHours = computed(() =>
+  tasks.value.reduce((sum, t) => sum + taskHours(t), 0).toFixed(1)
+)
+const completedHours = computed(() =>
+  tasks.value.filter(t => t.status === 'completed').reduce((sum, t) => sum + taskHours(t), 0).toFixed(1)
+)
+
 onMounted(() => {
   goalStore.fetch()
   loadTasks()
@@ -200,6 +231,20 @@ async function handleDelete(id) {
   } catch (e) {
     ElMessage.error('删除失败')
   }
+}
+
+async function batchDelete() {
+  const ids = tasks.value.map(t => t.id)
+  let count = 0
+  for (const id of ids) {
+    try {
+      await deleteTask(id)
+      count++
+    } catch { /* 跳过 */ }
+  }
+  tasks.value = []
+  expandedId.value = null
+  ElMessage.success(`已删除 ${count} 条任务`)
 }
 
 function openEdit(task) {
@@ -243,6 +288,53 @@ function statusTag(status) {
     upcoming:  { type: 'info',    text: '未开始' },
   }[status]
 }
+
+// 获取任务状态详细信息
+function getTaskStatusInfo(task) {
+  const now = new Date();
+  const start = new Date(`${task.task_date}T${task.start_time}+08:00`);
+  const end = new Date(`${task.task_date}T${task.end_time}+08:00`);
+
+  if (task.status === 'completed') {
+    return {
+      text: '已完成',
+      color: '#67c23a',
+      icon: 'Check',
+      description: '任务已完成'
+    };
+  } else if (task.status === 'expired') {
+    return {
+      text: '已过期',
+      color: '#f56c6c',
+      icon: 'Close',
+      description: '任务已过期，无法完成'
+    };
+  } else if (task.status === 'pending') {
+    const timeRemaining = end.getTime() - now.getTime();
+    const minutesRemaining = Math.ceil(timeRemaining / 60000);
+    return {
+      text: `进行中 (${minutesRemaining}分钟)`,
+      color: '#409eff',
+      icon: 'Clock',
+      description: `还剩${minutesRemaining}分钟`
+    };
+  } else {
+    const timeUntilStart = start.getTime() - now.getTime();
+    const hoursUntilStart = Math.ceil(timeUntilStart / 3600000);
+    return {
+      text: `未开始 (${hoursUntilStart}小时)`,
+      color: '#909399',
+      icon: 'Clock',
+      description: `还有${hoursUntilStart}小时开始`
+    };
+  }
+}
+
+// 计算每个任务的状态信息
+const statusInfo = computed(() => {
+  return tasks.value.map(task => getTaskStatusInfo(task));
+});
+
 </script>
 
 <style scoped>
@@ -253,6 +345,10 @@ function statusTag(status) {
 .header-right { display: flex; gap: 10px; align-items: center; }
 .summary-card { margin-bottom: 16px; border-radius: 12px; }
 .summary { display: flex; gap: 32px; align-items: center; flex-wrap: wrap; }
+.stat-block { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.stat-label { font-size: 12px; color: #909399; }
+.stat-value { font-size: 24px; font-weight: 600; color: #303133; }
+.stat-value.completed { color: #67c23a; }
 .progress-wrap { display: flex; flex-direction: column; gap: 6px; }
 .progress-label { font-size: 12px; color: #909399; }
 .timeline-card { border-radius: 12px; }
