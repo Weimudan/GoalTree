@@ -2,56 +2,26 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 
-// 状态计算缓存，提高性能
-const statusCache = new Map();
-
-// 动态计算任务状态（不存库，读取时算）
+// 动态计算任务状态（不存库，读取时实时计算）
 // status: 'upcoming' | 'pending' | 'completed' | 'expired'
-//   upcoming  — 还没到开始时间
-//   pending   — 在 [start_time, end_time+10min] 窗口内，可点完成
-//   completed — 已完成
-//   expired   — 超过 end_time+10min 仍未完成
 function calcStatus(task) {
   if (task.completed_at) return 'completed';
 
-  // 使用缓存键
-  const cacheKey = `${task.task_date}-${task.start_time}-${task.end_time}`;
-  if (statusCache.has(cacheKey)) {
-    return statusCache.get(cacheKey);
-  }
+  const now = Date.now();
+  const start = new Date(`${task.task_date}T${task.start_time}+08:00`).getTime();
+  const deadline = new Date(`${task.task_date}T${task.end_time}+08:00`).getTime() + 10 * 60 * 1000;
 
-  const now = new Date();
-  const start = new Date(`${task.task_date}T${task.start_time}+08:00`);
-  const deadline = new Date(`${task.task_date}T${task.end_time}+08:00`);
-  deadline.setMinutes(deadline.getMinutes() + 10);
-
-  // 优化：使用时间戳比较，提高性能
-  const nowTimestamp = now.getTime();
-  const startTimestamp = start.getTime();
-  const deadlineTimestamp = deadline.getTime();
-
-  let status;
-  if (nowTimestamp < startTimestamp) status = 'upcoming';
-  else if (nowTimestamp > deadlineTimestamp) status = 'expired';
-  else status = 'pending';
-
-  // 缓存结果
-  statusCache.set(cacheKey, status);
-  return status;
+  if (now < start) return 'upcoming';
+  if (now > deadline) return 'expired';
+  return 'pending';
 }
 
 function formatTask(task) {
   return { ...task, status: calcStatus(task) };
 }
 
-// 批量计算任务状态，提高性能
 function batchFormatTasks(tasks) {
   return tasks.map(formatTask);
-}
-
-// 清理缓存（可选：可以添加定时清理逻辑）
-function clearStatusCache() {
-  statusCache.clear();
 }
 
 // GET /api/tasks?date=2026-06-19 — 查询某天的所有任务（含状态）
@@ -92,7 +62,7 @@ router.get('/:id', async (req, res) => {
 
 // POST /api/tasks — 新建任务
 router.post('/', async (req, res) => {
-  const { goal_id, title, task_date, start_time, end_time } = req.body;
+  const { goal_id, title, task_date, start_time, end_time, expected_result } = req.body;
   if (!goal_id || !title || !task_date || !start_time || !end_time) {
     return res.status(400).json({ message: 'goal_id、title、task_date、start_time、end_time 均为必填' });
   }
@@ -105,8 +75,8 @@ router.post('/', async (req, res) => {
     if (!goal.length) return res.status(400).json({ message: '目标不存在' });
 
     const [result] = await db.query(
-      'INSERT INTO tasks (goal_id, title, task_date, start_time, end_time) VALUES (?, ?, ?, ?, ?)',
-      [goal_id, title, task_date, start_time, end_time]
+      'INSERT INTO tasks (goal_id, title, task_date, start_time, end_time, expected_result) VALUES (?, ?, ?, ?, ?, ?)',
+      [goal_id, title, task_date, start_time, end_time, expected_result || null]
     );
     const [rows] = await db.query('SELECT * FROM tasks WHERE id = ?', [result.insertId]);
     res.status(201).json(formatTask(rows[0]));
@@ -117,7 +87,7 @@ router.post('/', async (req, res) => {
 
 // PUT /api/tasks/:id — 修改任务基本信息
 router.put('/:id', async (req, res) => {
-  const { goal_id, title, task_date, start_time, end_time } = req.body;
+  const { goal_id, title, task_date, start_time, end_time, expected_result } = req.body;
   if (!goal_id || !title || !task_date || !start_time || !end_time) {
     return res.status(400).json({ message: '所有字段均为必填' });
   }
@@ -127,8 +97,8 @@ router.put('/:id', async (req, res) => {
 
   try {
     const [result] = await db.query(
-      'UPDATE tasks SET goal_id=?, title=?, task_date=?, start_time=?, end_time=? WHERE id=?',
-      [goal_id, title, task_date, start_time, end_time, req.params.id]
+      'UPDATE tasks SET goal_id=?, title=?, task_date=?, start_time=?, end_time=?, expected_result=? WHERE id=?',
+      [goal_id, title, task_date, start_time, end_time, expected_result || null, req.params.id]
     );
     if (result.affectedRows === 0) return res.status(404).json({ message: '任务不存在' });
     const [rows] = await db.query('SELECT * FROM tasks WHERE id = ?', [req.params.id]);
@@ -272,23 +242,43 @@ router.get('/stats/goal-time', async (req, res) => {
       }
     });
 
-    // 递归计算每个目标的累计耗时（自身任务耗时 + 所有子孙目标耗时）
-    function calcTotalHours(node) {
-      let total = goalTimeMap[node.id] || 0;
-      if (node.children) {
-        node.children.forEach(child => { total += calcTotalHours(child); });
-      }
-      node.total_hours = Math.round(total * 10) / 10;  // 保留1位小数
-      return total;
-    }
-    roots.forEach(r => calcTotalHours(r));
+    // 递归计算每个目标的累计耗时 + 预估时长 + 进度百分比
+    function calcStats(node) {
+      let totalHours = goalTimeMap[node.id] || 0;
+      let estimatedHours = Number(node.estimated_hours) || 0;
 
-    // 全局总耗时
-    const globalTotal = Object.values(goalTimeMap).reduce((a, b) => a + b, 0);
+      if (node.children && node.children.length) {
+        node.children.forEach(child => {
+          const childStats = calcStats(child);
+          totalHours += childStats.totalHours;
+          estimatedHours += childStats.estimatedHours;
+        });
+      }
+
+      node.total_hours = Math.round(totalHours * 10) / 10;        // 保留1位小数
+      node.estimated_hours = Math.round(estimatedHours * 10) / 10;
+      node.progress = estimatedHours > 0
+        ? Math.min(Math.round((totalHours / estimatedHours) * 100), 100)
+        : null;
+
+      return { totalHours, estimatedHours };
+    }
+
+    let globalEstimated = 0;
+    let globalTotal = 0;
+    roots.forEach(r => {
+      const stats = calcStats(r);
+      globalTotal += stats.totalHours;
+      globalEstimated += stats.estimatedHours;
+    });
 
     res.json({
       goals: roots,
       global_total_hours: Math.round(globalTotal * 10) / 10,
+      global_estimated_hours: Math.round(globalEstimated * 10) / 10,
+      global_progress: globalEstimated > 0
+        ? Math.min(Math.round((globalTotal / globalEstimated) * 100), 100)
+        : null,
     });
   } catch (err) {
     res.status(500).json({ message: err.message });

@@ -16,7 +16,13 @@
             :key="g.id"
             :label="g.title"
             :value="g.id"
-          />
+          >
+            <span :style="{ paddingLeft: g.depth * 24 + 'px' }">
+              <span v-if="g.depth === 0" class="root-icon">📁</span>
+              <span v-else class="child-icon">📄</span>
+              {{ g.title }}
+            </span>
+          </el-option>
         </el-select>
       </el-form-item>
       <el-form-item label="描述">
@@ -85,9 +91,9 @@ watch(() => props.editData, (val) => {
   }
 }, { immediate: true })
 
-// 编辑时不允许选自己作父目标
+// 编辑时不允许选自己作父目标（且排除已完成目标）
 const availableParents = computed(() =>
-  goalStore.flatList.filter(g => g.id !== props.editData?.id)
+  goalStore.flatActiveList.filter(g => g.id !== props.editData?.id)
 )
 
 const rules = {
@@ -168,3 +174,7 @@ function resetForm() {
   formRef.value?.resetFields()
 }
 </script>
+
+<style scoped>
+.root-icon, .child-icon { margin-right: 4px; font-size: 14px; }
+</style>

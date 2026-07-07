@@ -9,9 +9,30 @@
       <el-form-item label="任务名称" prop="title">
         <el-input v-model="form.title" placeholder="例如：背单词 Unit 5" maxlength="100" show-word-limit />
       </el-form-item>
+      <el-form-item label="预期结果">
+        <el-input
+          v-model="form.expected_result"
+          type="textarea"
+          :rows="2"
+          placeholder="例如：掌握 Unit 5 全部 50 个单词，能默写并造句"
+          maxlength="500"
+          show-word-limit
+        />
+      </el-form-item>
       <el-form-item label="所属目标" prop="goal_id">
         <el-select v-model="form.goal_id" placeholder="选择目标" filterable style="width:100%">
-          <el-option v-for="g in goalStore.flatList" :key="g.id" :label="g.title" :value="g.id" />
+          <el-option
+            v-for="g in goalStore.flatActiveList"
+            :key="g.id"
+            :label="g.title"
+            :value="g.id"
+          >
+            <span :style="{ paddingLeft: g.depth * 24 + 'px' }">
+              <span v-if="g.depth === 0" class="root-icon">📁</span>
+              <span v-else class="child-icon">📄</span>
+              {{ g.title }}
+            </span>
+          </el-option>
         </el-select>
       </el-form-item>
       <el-form-item label="日期" prop="task_date">
@@ -37,6 +58,10 @@
             @blur="validateTimeField('end_time')"
           />
         </div>
+        <div v-if="durationText" class="time-duration">
+          <el-icon><Timer /></el-icon>
+          时长：{{ durationText }}
+        </div>
         <div v-if="timeError" class="time-error">{{ timeError }}</div>
       </el-form-item>
     </el-form>
@@ -50,6 +75,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Timer } from '@element-plus/icons-vue'
 import { useGoalStore } from '../stores/goals'
 import { createTask, updateTask } from '../api/tasks'
 import { errorHandler } from '../utils/errorHandler'
@@ -66,18 +92,35 @@ const formRef = ref(null)
 const submitting = ref(false)
 const timeError = ref('')
 
+// 实时计算时长
+const durationText = computed(() => {
+  const s = form.value.start_time
+  const e = form.value.end_time
+  if (!TIME_RE.test(s) || !TIME_RE.test(e)) return ''
+  const [sh, sm] = s.split(':').map(Number)
+  const [eh, em] = e.split(':').map(Number)
+  const min = (eh * 60 + em) - (sh * 60 + sm)
+  if (min <= 0) return ''
+  const h = Math.floor(min / 60)
+  const m = min % 60
+  if (h > 0 && m > 0) return `${h} 小时 ${m} 分钟`
+  if (h > 0) return `${h} 小时`
+  return `${m} 分钟`
+})
+
 const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit('update:modelValue', v),
 })
 const isEdit = computed(() => !!props.editData)
 
-const form = ref({ title: '', goal_id: null, task_date: '', start_time: '', end_time: '' })
+const form = ref({ title: '', expected_result: '', goal_id: null, task_date: '', start_time: '', end_time: '' })
 
 watch(() => props.editData, (val) => {
   if (val) {
     form.value = {
       title: val.title,
+      expected_result: val.expected_result || '',
       goal_id: val.goal_id,
       task_date: val.task_date,
       start_time: val.start_time?.slice(0, 5) || '',
@@ -100,10 +143,35 @@ function onTimeInput(field, val) {
 
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
 
+/**
+ * 判断给定时间是否已过（仅在日期为今天时有效）
+ * @param {string} timeStr 格式 HH:mm，例如 "08:30"
+ * @returns {boolean} true=已过去
+ */
+function isTimeInPast(timeStr) {
+  if (!TIME_RE.test(timeStr)) return false
+  if (!form.value.task_date) return false
+
+  const [year, month, day] = form.value.task_date.split('-').map(Number)
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const selected = new Date(year, month - 1, day)
+
+  // 不是今天就不检查时间
+  if (selected.getTime() !== today.getTime()) return false
+
+  const [h, m] = timeStr.split(':').map(Number)
+  const selectedTime = h * 60 + m
+  const nowTime = now.getHours() * 60 + now.getMinutes()
+  return selectedTime <= nowTime
+}
+
 function validateTimeField(field) {
   const v = form.value[field]
   if (v && !TIME_RE.test(v)) {
     timeError.value = '格式错误，请输入 HH:mm，例如 09:00'
+  } else if (isTimeInPast(v)) {
+    timeError.value = '不能设置已经过去的时间'
   }
 }
 
@@ -118,6 +186,10 @@ function validateTimes() {
   }
   if (form.value.start_time >= form.value.end_time) {
     timeError.value = '开始时间必须早于结束时间'
+    return false
+  }
+  if (isTimeInPast(form.value.start_time)) {
+    timeError.value = '不能设置已经过去的时间'
     return false
   }
   return true
@@ -228,7 +300,7 @@ async function submit() {
 }
 
 function resetForm() {
-  form.value = { title: '', goal_id: null, task_date: props.defaultDate || '', start_time: '', end_time: '' }
+  form.value = { title: '', expected_result: '', goal_id: null, task_date: props.defaultDate || '', start_time: '', end_time: '' }
   timeError.value = ''
   formRef.value?.resetFields()
 }
@@ -238,5 +310,14 @@ function resetForm() {
 .time-range { display: flex; align-items: center; gap: 8px; width: 100%; }
 .time-input { width: 120px; }
 .time-sep { color: #909399; flex-shrink: 0; }
+.time-duration {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  font-size: 13px;
+  color: #409eff;
+}
 .time-error { color: #f56c6c; font-size: 12px; margin-top: 4px; }
+.root-icon, .child-icon { margin-right: 4px; font-size: 14px; }
 </style>

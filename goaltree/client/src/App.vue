@@ -31,7 +31,16 @@
 </template>
 
 <script setup>
+import { onMounted } from 'vue'
 import { Calendar, Aim, TrendCharts } from '@element-plus/icons-vue'
+import { useTaskReminder } from './composables/useTaskReminder.js'
+
+const { start, stop } = useTaskReminder()
+
+onMounted(() => {
+  start()
+})
+// stop 会在组件卸载时由 composable 内部的 onUnmounted 自动调用
 </script>
 
 <style>

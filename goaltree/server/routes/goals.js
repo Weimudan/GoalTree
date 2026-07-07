@@ -68,7 +68,7 @@ router.post('/', async (req, res) => {
 
 // PUT /api/goals/:id — 修改目标
 router.put('/:id', async (req, res) => {
-  const { title, description, parent_id, start_date, end_date, estimated_hours } = req.body;
+  const { title, description, parent_id, start_date, end_date, estimated_hours, completed_at } = req.body;
   if (!title) return res.status(400).json({ message: 'title 不能为空' });
 
   try {
@@ -78,13 +78,35 @@ router.put('/:id', async (req, res) => {
     }
 
     const [result] = await db.query(
-      'UPDATE goals SET title=?, description=?, parent_id=?, start_date=?, end_date=?, estimated_hours=? WHERE id=?',
-      [title, description || null, parent_id || null, start_date || null, end_date || null, estimated_hours || null, req.params.id]
+      'UPDATE goals SET title=?, description=?, parent_id=?, start_date=?, end_date=?, estimated_hours=?, completed_at=? WHERE id=?',
+      [title, description || null, parent_id || null, start_date || null, end_date || null, estimated_hours || null, completed_at || null, req.params.id]
     );
     if (result.affectedRows === 0) return res.status(404).json({ message: '目标不存在' });
 
     const [rows] = await db.query('SELECT * FROM goals WHERE id = ?', [req.params.id]);
     res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST /api/goals/:id/complete — 切换目标完成状态
+router.post('/:id/complete', async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM goals WHERE id = ?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ message: '目标不存在' });
+
+    const goal = rows[0];
+    if (goal.completed_at) {
+      // 已完成的 → 取消完成
+      await db.query('UPDATE goals SET completed_at = NULL WHERE id = ?', [req.params.id]);
+    } else {
+      // 未完成 → 标记完成
+      await db.query('UPDATE goals SET completed_at = NOW() WHERE id = ?', [req.params.id]);
+    }
+
+    const [updated] = await db.query('SELECT * FROM goals WHERE id = ?', [req.params.id]);
+    res.json(updated[0]);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
